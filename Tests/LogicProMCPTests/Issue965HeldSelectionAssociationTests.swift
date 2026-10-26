@@ -2224,6 +2224,37 @@ struct Issue965HeldSelectionAssociationTests {
                 "Keep the captured baseline, Saga before/after and inverse-ownership reads, and each checked scalar writer; duplicate adapter reads consume the same bounded native lifecycle")
     }
 
+    @Test("Canonical output exposes the actual forward and inverse child results without replacing its parent trace",
+          arguments: ["forward", "cancel", "ack_only"])
+    func canonicalOutputChildTracesReflectActualResults(mode: String) async throws {
+        try await FeatureFlags.withAdr005OperationTraceForTests(true) {
+            let f = try Fixture(), context = OperationTraceContext(), store = OperationTraceStore()
+            try await OperationTraceStore.$shared.withValue(store) {
+                try await OperationTraceContext.$current.withValue(context) {
+                    try await assertCanonicalPhysicalOutput(mode: mode, fixture: f)
+                }
+            }
+            let parentID = try #require(context.traceID)
+            let parent = try #require(await store.trace(parentID))
+            #expect(parent.operationID == "system.saga_execute")
+            let children = await store.recent(limit: 128).filter { trace in
+                trace.operationID == "mixer.set_output_verified" && trace.events.contains {
+                    $0.phase == .requestReceived && $0.attributes["parent_trace_id"] == parentID.rawValue
+                }
+            }
+            #expect(children.count == (mode == "cancel" ? 2 : 1), "Each actual output writer needs its own observable child")
+            for child in children {
+                #expect(child.traceID != parentID)
+                #expect(child.events.filter { $0.phase == .writeBoundaryCrossed }.count == 1)
+                #expect(child.events.contains {
+                    $0.phase == .verificationCompleted && $0.attributes["readback_state"] == (mode == "ack_only" ? "B" : "A")
+                }, "An ineffective acknowledged setter must never publish a verified A event")
+                #expect(child.events.contains { $0.phase == .resultEmitted })
+            }
+            #expect(f.routingDestinationPresses == (mode == "cancel" ? 2 : 1))
+        }
+    }
+
     @Test("An unavailable input goal cannot authorize only the supported output subset")
     func mixedInputCannotExecuteOnlyItsSupportedOutput() async throws {
         try await assertCanonicalPhysicalOutput(mode: "mixed_input")
