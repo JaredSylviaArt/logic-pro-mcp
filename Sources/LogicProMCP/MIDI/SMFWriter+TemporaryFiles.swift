@@ -244,4 +244,49 @@ extension SMFWriter {
         // (unregistered, so only the periodic sweep could ever reclaim it).
         return URL(fileURLWithPath: String(cString: created), isDirectory: true)
     }
+
+    // MARK: - Fork js-blueprint: song-build MIDI staging
+
+    /// Roots a blueprint build may import `.mid` files from. `LOGIC_MCP_IMPORT_ROOTS`
+    /// (colon-separated absolute paths) overrides the default. `/` is never accepted.
+    static func songBuildImportRoots() -> [String] {
+        let env = ProcessInfo.processInfo.environment["LOGIC_MCP_IMPORT_ROOTS"] ?? ""
+        let raw = env.isEmpty ? "/Volumes/Adobe/Song_Builds" : env
+        return raw.split(separator: ":")
+            .map { canonicalPath(URL(fileURLWithPath: String($0), isDirectory: true)) }
+            .filter { $0.hasPrefix("/") && $0 != "/" }
+    }
+
+    /// Copies an allowlisted `.mid` into a fresh server-managed staging directory, keeping its
+    /// file name so Logic names the imported track after the source, and registers it so the
+    /// existing import path accepts it. Returns nil (caller falls back to the original refusal)
+    /// for anything outside the roots, missing, empty, larger than 4 MB, or not `.mid`.
+    static func stageSongBuildMIDIFile(_ path: String) -> String? {
+        let source = URL(fileURLWithPath: path)
+        let sourcePath = canonicalPath(source)
+        guard URL(fileURLWithPath: sourcePath).pathExtension.lowercased() == "mid" else { return nil }
+        guard songBuildImportRoots().contains(where: { sourcePath.hasPrefix($0 + "/") }) else {
+            return nil
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: sourcePath, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: sourcePath),
+              let size = attributes[.size] as? NSNumber,
+              size.intValue > 0, size.intValue <= 4_000_000 else {
+            return nil
+        }
+        guard let staged = try? temporaryMIDIFile() else { return nil }
+        let baseName = URL(fileURLWithPath: sourcePath).lastPathComponent
+        let safeName = String(baseName.map { $0.isLetter || $0.isNumber || " -_.".contains($0) ? $0 : "_" })
+        let destination = staged.directoryURL.appendingPathComponent(safeName)
+        do {
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: sourcePath), to: destination)
+        } catch {
+            cleanupTemporaryMIDIFile(staged)
+            return nil
+        }
+        managedMIDIFiles.register(destination)
+        return canonicalPath(destination)
+    }
 }

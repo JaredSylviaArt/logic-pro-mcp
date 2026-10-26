@@ -10,7 +10,7 @@ struct MIDIDispatcher: OperationTraceDispatching {
 
     static let tool = commandTool(
         name: "logic_midi",
-        description: "MIDI operations in Logic Pro. Commands: send_note, send_chord, send_cc, send_program_change, send_pitch_bend, send_aftertouch, send_sysex, play_sequence, import_file, list_ports, create_virtual_port, step_input, mmc_play, mmc_stop, mmc_record, mmc_locate. Params: send_note/send_chord -> MIDI note payloads; send_cc/program_change/pitch_bend/aftertouch -> controller payloads; send_sysex -> { bytes: [Int] } or { data: String } (≤1024 bytes); play_sequence -> { notes: \"pitch,offsetMs,durMs[,vel[,ch]];...\" } (≤256 events, tight server-side timing); import_file -> { path: server-managed LogicProMCP temp .mid } and wait for verified:true before issuing the next import; list_ports -> {} (same data as logic://midi/ports; prefer the resource for polling); mmc_locate -> { bar: Int } or { time: \"HH:MM:SS:FF\" }; create_virtual_port -> { name: String }. The 7 send-style ops (send_note, send_chord, send_cc, send_program_change, send_pitch_bend, send_aftertouch, play_sequence) accept an optional { port: \"midi\"|\"keycmd\" } selector — default \"midi\" routes to the CoreMIDI virtual port; \"keycmd\" routes to the MIDIKeyCommands KeyCmd virtual port (requires one-time MIDI Learn in Logic). Channel is 1-based (1..16). All other ops reject `port` with invalid_params.",
+        description: "MIDI operations in Logic Pro. Commands: send_note, send_chord, send_cc, send_program_change, send_pitch_bend, send_aftertouch, send_sysex, play_sequence, import_file, list_ports, create_virtual_port, step_input, mmc_play, mmc_stop, mmc_record, mmc_locate. Params: send_note/send_chord -> MIDI note payloads; send_cc/program_change/pitch_bend/aftertouch -> controller payloads; send_sysex -> { bytes: [Int] } or { data: String } (≤1024 bytes); play_sequence -> { notes: \"pitch,offsetMs,durMs[,vel[,ch]];...\" } (≤256 events, tight server-side timing); import_file -> { path: server-managed LogicProMCP temp .mid, or a .mid under LOGIC_MCP_IMPORT_ROOTS (default /Volumes/Adobe/Song_Builds), staged as a managed copy } and wait for verified:true before issuing the next import; list_ports -> {} (same data as logic://midi/ports; prefer the resource for polling); mmc_locate -> { bar: Int } or { time: \"HH:MM:SS:FF\" }; create_virtual_port -> { name: String }. The 7 send-style ops (send_note, send_chord, send_cc, send_program_change, send_pitch_bend, send_aftertouch, play_sequence) accept an optional { port: \"midi\"|\"keycmd\" } selector — default \"midi\" routes to the CoreMIDI virtual port; \"keycmd\" routes to the MIDIKeyCommands KeyCmd virtual port (requires one-time MIDI Learn in Logic). Channel is 1-based (1..16). All other ops reject `port` with invalid_params.",
         commandDescription: "MIDI command to execute"
     )
 
@@ -664,8 +664,15 @@ struct MIDIDispatcher: OperationTraceDispatching {
             return .failure(ValidationFailure("import_file 'path' must not contain control characters"))
         }
 
+        if AccessibilityChannel.validatedMIDIImportPath(path) == nil,
+           let staged = SMFWriter.stageSongBuildMIDIFile(path),
+           let normalized = AccessibilityChannel.validatedMIDIImportPath(staged) {
+            // Fork js-blueprint: a song-build .mid under LOGIC_MCP_IMPORT_ROOTS is copied into
+            // managed staging; everything downstream sees an ordinary managed import.
+            return .success(normalized)
+        }
         guard let normalized = AccessibilityChannel.validatedMIDIImportPath(path) else {
-            return .failure(ValidationFailure("import_file 'path' must be a server-managed LogicProMCP temp .mid"))
+            return .failure(ValidationFailure("import_file 'path' must be a server-managed LogicProMCP temp .mid or a .mid under LOGIC_MCP_IMPORT_ROOTS (default /Volumes/Adobe/Song_Builds)"))
         }
         return .success(normalized)
     }
